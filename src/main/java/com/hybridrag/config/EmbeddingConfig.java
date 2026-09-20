@@ -17,7 +17,7 @@ public class EmbeddingConfig {
         return new AllMiniLmL6V2EmbeddingModel();
     }
 
-    @Value("${app.gemini.api-key}")
+    @Value("${app.gemini.api.key}")
     private String geminiApiKey;
 
     @Value("${gemini.embedding.model.name}")
