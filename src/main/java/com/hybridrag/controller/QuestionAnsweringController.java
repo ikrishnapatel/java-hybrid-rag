@@ -27,4 +27,14 @@ public class QuestionAnsweringController {
         QuestionAnswerResponseDto response = questionAnsweringService.answerQuestion(query, useLLMEmbedding, topK);
         return ResponseEntity.ok(response);
     }
+
+    @GetMapping("/ask-query-multi")
+    public ResponseEntity<QuestionAnswerResponseDto> askQuestionMulti(
+            @RequestParam("query") String query,
+            @RequestParam(value = "useLLMEmbedding", defaultValue = "false") boolean useLLMEmbedding,
+            @RequestParam(value = "topK", defaultValue = "3") int topK) {
+
+        QuestionAnswerResponseDto response = questionAnsweringService.answerQuestionWithMultiQuery(query, useLLMEmbedding, topK);
+        return ResponseEntity.ok(response);
+    }
 }

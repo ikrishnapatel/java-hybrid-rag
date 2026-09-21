@@ -43,9 +43,6 @@ public class BM25SearchService {
         }
     }
 
-    /**
-     * Index text segments into Lucene for BM25 keyword search.
-     */
     public synchronized void indexSegments(List<TextSegment> segments) throws IOException {
         IndexWriterConfig config = new IndexWriterConfig(analyzer);
         config.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
@@ -63,9 +60,6 @@ public class BM25SearchService {
         }
     }
 
-    /**
-     * Search text segments using BM25 keyword matching algorithm.
-     */
     public List<BM25Result> search(String queryText, int maxResults) throws Exception {
         List<BM25Result> results = new ArrayList<>();
         if (!DirectoryReader.indexExists(indexDirectory)) {
