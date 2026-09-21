@@ -1,8 +1,7 @@
 package com.hybridrag.service;
 
-import dev.langchain4j.data.segment.TextSegment;
+import org.springframework.ai.document.Document;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
-import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.document.StringField;
@@ -43,17 +42,17 @@ public class BM25SearchService {
         }
     }
 
-    public synchronized void indexSegments(List<TextSegment> segments) throws IOException {
+    public synchronized void indexSegments(List<Document> segments) throws IOException {
         IndexWriterConfig config = new IndexWriterConfig(analyzer);
         config.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
         config.setSimilarity(new BM25Similarity());
 
         try (IndexWriter writer = new IndexWriter(indexDirectory, config)) {
             for (int i = 0; i < segments.size(); i++) {
-                TextSegment segment = segments.get(i);
-                Document doc = new Document();
+                Document segment = segments.get(i);
+                org.apache.lucene.document.Document doc = new org.apache.lucene.document.Document();
                 doc.add(new StringField("id", java.util.UUID.randomUUID().toString(), Field.Store.YES));
-                doc.add(new TextField("text", segment.text(), Field.Store.YES));
+                doc.add(new TextField("text", segment.getContent(), Field.Store.YES));
                 writer.addDocument(doc);
             }
             writer.commit();
@@ -88,7 +87,7 @@ public class BM25SearchService {
             TopDocs topDocs = searcher.search(query, maxResults);
 
             for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
-                Document doc = searcher.doc(scoreDoc.doc);
+                org.apache.lucene.document.Document doc = searcher.doc(scoreDoc.doc);
                 results.add(new BM25Result(
                         doc.get("id"),
                         doc.get("text"),

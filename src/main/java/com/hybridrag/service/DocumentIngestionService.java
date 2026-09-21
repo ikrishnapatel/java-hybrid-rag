@@ -1,82 +1,80 @@
 package com.hybridrag.service;
 
-import dev.langchain4j.data.document.Document;
-import dev.langchain4j.data.document.parser.apache.pdfbox.ApachePdfBoxDocumentParser;
-import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.model.embedding.EmbeddingModel;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.reader.ExtractedTextFormatter;
+import org.springframework.ai.reader.pdf.PagePdfDocumentReader;
+import org.springframework.ai.reader.pdf.config.PdfDocumentReaderConfig;
+import org.springframework.ai.transformer.splitter.TokenTextSplitter;
+import org.springframework.ai.vectorstore.ChromaVectorStore;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.InputStreamResource;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
-import dev.langchain4j.data.document.DocumentParser;
 
 import java.io.InputStream;
 import java.util.List;
-import com.hybridrag.repository.ChromaDocumentRepository;
-import dev.langchain4j.data.embedding.Embedding;
-import dev.langchain4j.model.output.Response;
+import java.util.stream.Collectors;
 
 @Service
 public class DocumentIngestionService {
 
-    private final EmbeddingModel defaultEmbeddingModel;
-    private final EmbeddingModel llmEmbeddingModel;
-    private final ChromaDocumentRepository documentRepository;
+    private final ChromaVectorStore defaultVectorStore;
+    private final ChromaVectorStore llmVectorStore;
     private final BM25SearchService bm25SearchService;
 
     public DocumentIngestionService(
-            @Qualifier("defaultEmbeddingModel") EmbeddingModel defaultEmbeddingModel,
-            @Qualifier("llmEmbeddingModel") EmbeddingModel llmEmbeddingModel,
-            ChromaDocumentRepository documentRepository,
+            @Qualifier("defaultVectorStore") ChromaVectorStore defaultVectorStore,
+            @Qualifier("llmVectorStore") ChromaVectorStore llmVectorStore,
             BM25SearchService bm25SearchService) {
-        this.defaultEmbeddingModel = defaultEmbeddingModel;
-        this.llmEmbeddingModel = llmEmbeddingModel;
-        this.documentRepository = documentRepository;
+        this.defaultVectorStore = defaultVectorStore;
+        this.llmVectorStore = llmVectorStore;
         this.bm25SearchService = bm25SearchService;
     }
 
     public void processAndIngestDocument(MultipartFile file, boolean useLLMEmbedding) throws Exception {
-        Document document = parseDocument(file);
+        // Parse Document using Spring AI PDF Reader
+        List<Document> documents = parseDocument(file);
 
-        List<TextSegment> segments = splitDocument(document);
+        // Split Document using Spring AI TokenTextSplitter
+        TokenTextSplitter splitter = new TokenTextSplitter();
+        List<Document> segments = splitter.apply(documents);
 
         System.out.println("Document split into " + segments.size() + " chunks.");
-        EmbeddingModel selectedModel = useLLMEmbedding ? llmEmbeddingModel : defaultEmbeddingModel;
+        
+        ChromaVectorStore selectedStore = useLLMEmbedding ? llmVectorStore : defaultVectorStore;
 
-        System.out.println("Generating embeddings using: " + selectedModel.getClass().getSimpleName());
+        System.out.println("Generating embeddings using Spring AI and adding to Chroma...");
+        selectedStore.add(segments);
 
-        Response<List<Embedding>> embeddingsResponse = selectedModel.embedAll(segments);
-        List<Embedding> embeddings = embeddingsResponse.content();
-
-        documentRepository.saveAll(embeddings, segments, useLLMEmbedding);
-
+        // Index the same segments for BM25 hybrid search
         bm25SearchService.indexSegments(segments);
         
         System.out.println("Embeddings saved to ChromaDB and segments indexed into BM25!");
     }
 
     public void deleteChunkById(String id, boolean useLLMEmbedding) {
-        documentRepository.delete(id, useLLMEmbedding);
+        ChromaVectorStore selectedStore = useLLMEmbedding ? llmVectorStore : defaultVectorStore;
+        selectedStore.delete(List.of(id));
     }
 
     public void deleteChunksBatch(List<String> ids, boolean useLLMEmbedding) {
-        documentRepository.deleteAll(ids, useLLMEmbedding);
+        ChromaVectorStore selectedStore = useLLMEmbedding ? llmVectorStore : defaultVectorStore;
+        selectedStore.delete(ids);
     }
 
-    private Document parseDocument(MultipartFile file) throws Exception {
+    private List<Document> parseDocument(MultipartFile file) throws Exception {
         try (InputStream inputStream = file.getInputStream()) {
-            DocumentParser parser = new ApachePdfBoxDocumentParser();
-            return parser.parse(inputStream);
+            Resource resource = new InputStreamResource(inputStream);
+            PagePdfDocumentReader pdfReader = new PagePdfDocumentReader(resource,
+                    PdfDocumentReaderConfig.builder()
+                            .withPageExtractedTextFormatter(ExtractedTextFormatter.builder()
+                                    .withNumberOfBottomTextLinesToDelete(0)
+                                    .withNumberOfTopPagesToSkipBeforeDelete(0)
+                                    .build())
+                            .withPagesPerDocument(1)
+                            .build());
+            return pdfReader.get();
         }
-    }
-
-    private List<TextSegment> splitDocument(Document document) {
-        String text = document.text();
-        int chunkSize = 2000; // rough char estimate for 500 tokens
-        java.util.ArrayList<TextSegment> segments = new java.util.ArrayList<>();
-        for (int i = 0; i < text.length(); i += chunkSize) {
-            int end = Math.min(text.length(), i + chunkSize);
-            segments.add(TextSegment.from(text.substring(i, end)));
-        }
-        return segments;
     }
 }

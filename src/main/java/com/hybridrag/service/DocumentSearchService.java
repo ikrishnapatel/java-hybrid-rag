@@ -1,12 +1,9 @@
 package com.hybridrag.service;
 
 import com.hybridrag.dto.SearchResultDto;
-import com.hybridrag.repository.ChromaDocumentRepository;
-import dev.langchain4j.data.embedding.Embedding;
-import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.model.embedding.EmbeddingModel;
-import dev.langchain4j.model.output.Response;
-import dev.langchain4j.store.embedding.EmbeddingMatch;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.ChromaVectorStore;
+import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
@@ -16,48 +13,39 @@ import java.util.stream.Collectors;
 @Service
 public class DocumentSearchService {
 
-    private final EmbeddingModel defaultEmbeddingModel;
-    private final EmbeddingModel llmEmbeddingModel;
-    private final ChromaDocumentRepository documentRepository;
+    private final ChromaVectorStore defaultVectorStore;
+    private final ChromaVectorStore llmVectorStore;
     private final BM25SearchService bm25SearchService;
 
     public DocumentSearchService(
-            @Qualifier("defaultEmbeddingModel") EmbeddingModel defaultEmbeddingModel,
-            @Qualifier("llmEmbeddingModel") EmbeddingModel llmEmbeddingModel,
-            ChromaDocumentRepository documentRepository,
+            @Qualifier("defaultVectorStore") ChromaVectorStore defaultVectorStore,
+            @Qualifier("llmVectorStore") ChromaVectorStore llmVectorStore,
             BM25SearchService bm25SearchService) {
-        this.defaultEmbeddingModel = defaultEmbeddingModel;
-        this.llmEmbeddingModel = llmEmbeddingModel;
-        this.documentRepository = documentRepository;
+        this.defaultVectorStore = defaultVectorStore;
+        this.llmVectorStore = llmVectorStore;
         this.bm25SearchService = bm25SearchService;
     }
 
     public List<SearchResultDto> searchSimilarDocuments(String query, int maxResults, double minScore, boolean useLLMEmbedding) {
 
-        EmbeddingModel selectedModel = useLLMEmbedding ? llmEmbeddingModel : defaultEmbeddingModel;
+        ChromaVectorStore selectedStore = useLLMEmbedding ? llmVectorStore : defaultVectorStore;
 
+        List<Document> documents = selectedStore.similaritySearch(
+                SearchRequest.query(query)
+                        .withTopK(maxResults)
+                        .withFilterExpression(new org.springframework.ai.vectorstore.filter.FilterExpressionBuilder().ne("dummy", "dummy").build())
+        );
 
-        Response<Embedding> queryEmbeddingResponse = selectedModel.embed(query);
-        Embedding queryEmbedding = queryEmbeddingResponse.content();
-
-        List<EmbeddingMatch<TextSegment>> matches = documentRepository.searchRelevant(queryEmbedding, maxResults, minScore, useLLMEmbedding);
-
-
-        return matches.stream().map(match -> {
-            TextSegment segment = match.embedded();
-            String text = segment != null ? segment.text() : null;
-            Double score = match.score();
-            java.util.Map<String, Object> metadata = null;
-            if (segment != null && segment.metadata() != null) {
-                metadata = segment.metadata().toMap();
-            }
+        return documents.stream().map(doc -> {
+            String text = doc.getContent();
+            Double score = doc.getMetadata().containsKey("distance") ? ((Number) doc.getMetadata().get("distance")).doubleValue() : 0.0;
             return new SearchResultDto(
-                    match.embeddingId(),
+                    doc.getId(),
                     text,
                     score,
-                    metadata
+                    doc.getMetadata()
             );
-        }).collect(Collectors.toList());
+        }).filter(res -> (1.0 - res.getScore()) >= minScore).collect(Collectors.toList());
     }
 
     public List<SearchResultDto> searchBM25(String query, int maxResults) throws Exception {

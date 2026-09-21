@@ -2,13 +2,12 @@ package com.hybridrag.service;
 
 import com.hybridrag.dto.QuestionAnswerResponseDto;
 import com.hybridrag.exception.RagQueryProcessingException;
-import com.hybridrag.repository.ChromaDocumentRepository;
-import dev.langchain4j.data.embedding.Embedding;
-import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.model.chat.ChatLanguageModel;
-import dev.langchain4j.model.embedding.EmbeddingModel;
-import dev.langchain4j.model.output.Response;
-import dev.langchain4j.store.embedding.EmbeddingMatch;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.ChromaVectorStore;
+import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
@@ -22,20 +21,17 @@ import java.util.stream.Collectors;
 @Service
 public class QuestionAnsweringService {
 
-    private final EmbeddingModel defaultEmbeddingModel;
-    private final EmbeddingModel llmEmbeddingModel;
-    private final ChromaDocumentRepository documentRepository;
-    private final ChatLanguageModel geminiChatModel;
+    private final ChromaVectorStore defaultVectorStore;
+    private final ChromaVectorStore llmVectorStore;
+    private final ChatClient chatClient;
 
     public QuestionAnsweringService(
-            @Qualifier("defaultEmbeddingModel") EmbeddingModel defaultEmbeddingModel,
-            @Qualifier("llmEmbeddingModel") EmbeddingModel llmEmbeddingModel,
-            ChromaDocumentRepository documentRepository,
-            ChatLanguageModel geminiChatModel) {
-        this.defaultEmbeddingModel = defaultEmbeddingModel;
-        this.llmEmbeddingModel = llmEmbeddingModel;
-        this.documentRepository = documentRepository;
-        this.geminiChatModel = geminiChatModel;
+            @Qualifier("defaultVectorStore") ChromaVectorStore defaultVectorStore,
+            @Qualifier("llmVectorStore") ChromaVectorStore llmVectorStore,
+            ChatModel chatModel) {
+        this.defaultVectorStore = defaultVectorStore;
+        this.llmVectorStore = llmVectorStore;
+        this.chatClient = ChatClient.create(chatModel);
     }
 
     public QuestionAnswerResponseDto answerQuestion(String userQuery, boolean useLLMEmbedding, int topK) {
@@ -44,20 +40,17 @@ public class QuestionAnsweringService {
         }
 
         try {
-            EmbeddingModel selectedModel = useLLMEmbedding ? llmEmbeddingModel : defaultEmbeddingModel;
-            Response<Embedding> embeddingResponse = selectedModel.embed(userQuery);
-            Embedding queryEmbedding = embeddingResponse.content();
+            ChromaVectorStore selectedStore = useLLMEmbedding ? llmVectorStore : defaultVectorStore;
 
-            List<EmbeddingMatch<TextSegment>> matches = documentRepository.searchRelevant(
-                    queryEmbedding,
-                    topK,
-                    0.0,
-                    useLLMEmbedding
+            List<Document> documents = selectedStore.similaritySearch(
+                    SearchRequest.query(userQuery)
+                            .withTopK(topK)
+                            .withFilterExpression(new org.springframework.ai.vectorstore.filter.FilterExpressionBuilder().ne("dummy", "dummy").build())
             );
 
-            List<String> contextChunks = matches.stream()
-                    .map(match -> match.embedded() != null ? match.embedded().text() : "")
-                    .filter(text -> !text.trim().isEmpty())
+            List<String> contextChunks = documents.stream()
+                    .map(Document::getContent)
+                    .filter(text -> text != null && !text.trim().isEmpty())
                     .collect(Collectors.toList());
 
             String combinedContext = String.join("\n\n--- Chunk ---\n\n", contextChunks);
@@ -68,7 +61,8 @@ public class QuestionAnsweringService {
                     userQuery
             );
 
-            String answer = geminiChatModel.generate(prompt);
+            String answer = chatClient.prompt(new Prompt(prompt)).call().content();
+            
             return new QuestionAnswerResponseDto(
                     200,
                     "Success",
@@ -87,6 +81,7 @@ public class QuestionAnsweringService {
         }
 
         try {
+            // 1. Ask LLM to generate multiple queries
             String queryGenerationPrompt = String.format(
                     "You are an AI assistant tasked with generating search queries to find relevant information in a vector database. " +
                     "Generate 3 distinct search queries related to the following question. " +
@@ -94,7 +89,7 @@ public class QuestionAnsweringService {
                     userQuery
             );
             
-            String generatedQueriesStr = geminiChatModel.generate(queryGenerationPrompt);
+            String generatedQueriesStr = chatClient.prompt(new Prompt(queryGenerationPrompt)).call().content();
             List<String> queries = Arrays.stream(generatedQueriesStr.split("\n"))
                                          .map(String::trim)
                                          .filter(s -> !s.isEmpty())
@@ -103,26 +98,19 @@ public class QuestionAnsweringService {
             if (!queries.contains(userQuery.trim())) {
                 queries.add(userQuery.trim());
             }
-            EmbeddingModel selectedModel = useLLMEmbedding ? llmEmbeddingModel : defaultEmbeddingModel;
+
+            // 2. Perform search for each query and combine results
+            ChromaVectorStore selectedStore = useLLMEmbedding ? llmVectorStore : defaultVectorStore;
             Set<String> uniqueContextChunks = new LinkedHashSet<>();
 
             for (String q : queries) {
-                Response<Embedding> embeddingResponse = selectedModel.embed(q);
-                Embedding queryEmbedding = embeddingResponse.content();
-
-                List<EmbeddingMatch<TextSegment>> matches = documentRepository.searchRelevant(
-                        queryEmbedding,
-                        topK,
-                        0.0,
-                        useLLMEmbedding
+                List<Document> docs = selectedStore.similaritySearch(
+                        SearchRequest.query(q).withTopK(topK).withFilterExpression(new org.springframework.ai.vectorstore.filter.FilterExpressionBuilder().ne("dummy", "dummy").build())
                 );
 
-                for (EmbeddingMatch<TextSegment> match : matches) {
-                    if (match.embedded() != null) {
-                        String text = match.embedded().text();
-                        if (text != null && !text.trim().isEmpty()) {
-                            uniqueContextChunks.add(text);
-                        }
+                for (Document doc : docs) {
+                    if (doc.getContent() != null && !doc.getContent().trim().isEmpty()) {
+                        uniqueContextChunks.add(doc.getContent());
                     }
                 }
             }
@@ -130,13 +118,16 @@ public class QuestionAnsweringService {
             List<String> contextChunks = new ArrayList<>(uniqueContextChunks);
             String combinedContext = String.join("\n\n--- Chunk ---\n\n", contextChunks);
 
+            // 3. Construct final Prompt Template
             String prompt = String.format(
                     "Answer the question based ONLY on the following context: %s. Question: %s",
                     combinedContext,
                     userQuery
             );
 
-            String answer = geminiChatModel.generate(prompt);
+            // 4. Send prompt to Gemini model and get response
+            String answer = chatClient.prompt(new Prompt(prompt)).call().content();
+            
             return new QuestionAnswerResponseDto(
                     200,
                     "Success",
